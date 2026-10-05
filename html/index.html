@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  .layer { position: fixed; pointer-events: none; opacity: 0; }
+  #haze  { inset: 0; background: rgb(236, 230, 218); }
+  #vignette { inset: 0; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(10,8,6,.85) 100%); }
+  #blotch { left: 0; top: 0; width: 36vmin; height: 36vmin; margin: -18vmin 0 0 -18vmin; border-radius: 50%; filter: blur(2.2vmin); }
+  #edge  { inset: 0; background: #fffaf0; }
+  #core  { inset: 0; }
+</style>
+</head>
+<body>
+<div id="haze" class="layer"></div>
+<div id="vignette" class="layer"></div>
+<div id="blotch" class="layer"></div>
+<div id="edge" class="layer"></div>
+<div id="core" class="layer"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const elHaze = $('haze'), elVig = $('vignette'), elBlotch = $('blotch'), elEdge = $('edge'), elCore = $('core');
+
+let edge = 0, core = 0, haze = 0, vig = 0;
+let holdUntil = 0, fadeMs = 1000;
+let cx = 50, cy = 50;
+let blotch = { i: 0, x: 50, y: 50, born: 0, life: 1 };
+let lastBang = 0, repeatN = 0;
+let last = performance.now();
+
+const STOPS = [
+  [0.00, [255, 252, 238]],
+  [0.25, [255, 228, 130]],
+  [0.55, [240, 150,  90]],
+  [1.00, [150,  95, 190]],
+];
+function blotchColour(p) {
+  for (let i = 1; i < STOPS.length; i++) {
+    if (p <= STOPS[i][0]) {
+      const [p0, c0] = STOPS[i - 1], [p1, c1] = STOPS[i];
+      const k = (p - p0) / (p1 - p0);
+      return c0.map((v, j) => Math.round(v + (c1[j] - v) * k));
+    }
+  }
+  return STOPS[STOPS.length - 1][1];
+}
+
+function frame(t) {
+  const dt = Math.min(0.1, (t - last) / 1000); last = t;
+
+  if (t > holdUntil) {
+    edge *= Math.exp(-dt * 4500 / fadeMs);
+    core *= Math.exp(-dt * 2000 / fadeMs);
+    if (edge < 0.5) haze *= Math.exp(-dt * 1100 / fadeMs);
+  }
+  vig = Math.max(0, vig - dt * 0.09);
+  if (edge < 0.003) edge = 0;
+  if (core < 0.003) core = 0;
+  if (haze < 0.003) haze = 0;
+
+  const recovering = t > holdUntil && core > 0.05;
+  const pulse = recovering ? 1 + 0.07 * Math.sin(t / 170) : 1;
+
+  elEdge.style.opacity = Math.min(1, edge).toFixed(3);
+  elCore.style.opacity = Math.min(1, core * pulse).toFixed(3);
+  elCore.style.background =
+    `radial-gradient(circle at ${cx}% ${cy}%, #fffef8 0%, #fffcf0 22%, rgba(255,248,230,0) 72%)`;
+  elHaze.style.opacity = Math.min(0.5, haze).toFixed(3);
+  elVig.style.opacity  = Math.min(0.75, vig).toFixed(3);
+
+  const age = (t - blotch.born) / 1000;
+  if (blotch.i > 0 && age < blotch.life) {
+    const p = age / blotch.life;
+    const a = blotch.i * Math.pow(1 - p, 1.4) * 0.8;
+    const [r, g, b] = blotchColour(p);
+    const wx = Math.sin(t / 900) * 0.8, wy = Math.cos(t / 1300) * 0.6;
+    elBlotch.style.left = (blotch.x + wx) + 'vw';
+    elBlotch.style.top  = (blotch.y + wy) + 'vh';
+    elBlotch.style.background =
+      `radial-gradient(circle, rgba(${r},${g},${b},1) 0%, rgba(${r},${g},${b},.55) 35%, rgba(${r},${g},${b},0) 70%)`;
+    elBlotch.style.opacity = a.toFixed(3);
+  } else {
+    blotch.i = 0;
+    elBlotch.style.opacity = 0;
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+let ctx = null, master = null, tinOsc = null, tinGain = null, bangBuf = null;
+
+function ac() {
+  if (!ctx) {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    master = ctx.createDynamicsCompressor();
+    master.threshold.value = -12; master.ratio.value = 12;
+    master.connect(ctx.destination);
+    fetch('sounds/bang.ogg').then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+      .then(b => ctx.decodeAudioData(b)).then(d => { bangBuf = d; }).catch(() => {});
+  }
+  if (ctx.state === 'suspended') ctx.resume();
+  return ctx;
+}
+
+function playBang(vol, pan, muffle) {
+  const c = ac(), now = c.currentTime;
+  const out = c.createGain(); out.gain.value = vol;
+  const p = c.createStereoPanner(); p.pan.value = pan;
+  const lp = c.createBiquadFilter(); lp.type = 'lowpass';
+  lp.frequency.value = 350 + 5200 * Math.pow(1 - muffle, 2);
+  lp.connect(out); out.connect(p); p.connect(master);
+
+  if (bangBuf) {
+    const s = c.createBufferSource(); s.buffer = bangBuf;
+    s.playbackRate.value = 0.94 + Math.random() * 0.12;
+    s.connect(lp); s.start(now);
+    return;
+  }
+  const len = Math.floor(c.sampleRate * 0.7);
+  const buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 9);
+  const n = c.createBufferSource(); n.buffer = buf; n.connect(lp); n.start(now);
+  const o = c.createOscillator(), og = c.createGain();
+  o.frequency.setValueAtTime(140, now);
+  o.frequency.exponentialRampToValueAtTime(32, now + 0.3);
+  og.gain.setValueAtTime(0.75, now);
+  og.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+  o.connect(og); og.connect(lp); o.start(now); o.stop(now + 0.45);
+}
+
+function tinnitus(level, ms, scale) {
+  if (scale <= 0) return;
+  const c = ac(), now = c.currentTime;
+  if (!tinOsc) {
+    tinOsc = c.createOscillator(); tinOsc.type = 'sine'; tinOsc.frequency.value = 3600;
+    const lfo = c.createOscillator(), lfoG = c.createGain();
+    lfo.frequency.value = 0.28; lfoG.gain.value = 35; lfo.connect(lfoG); lfoG.connect(tinOsc.frequency); lfo.start();
+    tinGain = c.createGain(); tinGain.gain.value = 0;
+    tinOsc.connect(tinGain); tinGain.connect(master); tinOsc.start();
+  }
+  const target = Math.max(tinGain.gain.value, 0.025 * level * scale);
+  tinGain.gain.cancelScheduledValues(now);
+  tinGain.gain.setValueAtTime(tinGain.gain.value, now);
+  tinGain.gain.linearRampToValueAtTime(target, now + 0.5);
+  tinGain.gain.setTargetAtTime(0, now + ms / 4000, ms / 4000);
+}
+
+window.addEventListener('message', (e) => {
+  const m = e.data;
+  const t = performance.now();
+
+  if (m.type === 'bang') {
+    repeatN = (t - lastBang < 2500) ? Math.min(repeatN + 1, 8) : 0;
+    lastBang = t;
+    const k = 1 / (1 + 0.45 * repeatN);
+    const f = m.flash * k;
+
+    if (f > 0.02) {
+      edge = Math.max(edge, f);
+      core = Math.max(core, Math.min(1, f * 1.15));
+      haze = Math.max(haze, f * 0.5);
+      vig  = Math.max(vig, f * 0.75);
+      holdUntil = Math.max(holdUntil, t + m.hold * k);
+      fadeMs = Math.max(fadeMs, m.fade);
+
+      if (m.onScreen && f > 0.12) {
+        cx = m.sx * 100; cy = m.sy * 100;
+        const age = (t - blotch.born) / 1000;
+        const remaining = blotch.i * Math.max(0, 1 - age / blotch.life);
+        if (f >= remaining) {
+          blotch = { i: Math.min(1, f), x: cx, y: cy, born: t, life: 3 + 6 * f };
+        }
+      } else if (!m.onScreen) {
+        cx = 50; cy = 50;
+      }
+    }
+
+    let muffle = Math.min(1, Math.max(m.dist * 0.8, m.deaf * 0.85));
+    if (m.occluded) muffle = Math.max(muffle, 0.9);
+    playBang(Math.max(0.05, m.audio) * m.volume, m.pan, muffle);
+    if (m.audio > 0.35) tinnitus(m.audio, m.deafMs, m.tin === undefined ? 1 : m.tin);
+  }
+
+  if (m.type === 'reset') {
+    edge = core = haze = vig = 0; holdUntil = 0; fadeMs = 1000;
+    blotch.i = 0; repeatN = 0;
+    if (tinGain) { tinGain.gain.cancelScheduledValues(ctx.currentTime); tinGain.gain.setValueAtTime(0, ctx.currentTime); }
+  }
+});
+</script>
+</body>
+</html>
